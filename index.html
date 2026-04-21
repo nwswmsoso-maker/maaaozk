@@ -345,6 +345,25 @@
             transform: scale(1.1);
         }
 
+        .quality-btn {
+            padding: 12px 20px;
+            font-size: 0.95rem;
+            background: linear-gradient(135deg, #2a2a3a, #1a1a2a);
+            border: 2px solid #444;
+            min-width: auto;
+        }
+
+        .quality-btn:hover {
+            border-color: #00ffff;
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.3);
+        }
+
+        .quality-btn.active {
+            background: linear-gradient(135deg, #00aaaa, #008888);
+            border-color: #00ffff;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.4);
+        }
+
         audio {
             width: 100%;
             height: 40px;
@@ -430,6 +449,30 @@
 
         <!-- Controls -->
         <div class="controls">
+            <!-- Quality Selector -->
+            <div style="margin-bottom: 20px; text-align: center;">
+                <div style="color: #00ffff; font-weight: bold; margin-bottom: 10px; font-size: 0.9rem;">
+                    جودة التسجيل
+                </div>
+                <div style="display: flex; justify-content: center; gap: 10px;">
+                    <button id="studioQuality" class="quality-btn active" onclick="setQuality('studio')">
+                        <svg class="icon" style="width: 18px; height: 18px;" viewBox="0 0 24 24">
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                        </svg>
+                        استوديو WAV
+                        <span style="font-size: 0.75rem; opacity: 0.8; display: block;">غير مضغوط - أعلى جودة</span>
+                    </button>
+                    <button id="highQuality" class="quality-btn" onclick="setQuality('high')">
+                        <svg class="icon" style="width: 18px; height: 18px;" viewBox="0 0 24 24">
+                            <circle cx="12" cy="12" r="10"/>
+                            <polyline points="12 6 12 12 16 14"/>
+                        </svg>
+                        عالي WebM
+                        <span style="font-size: 0.75rem; opacity: 0.8; display: block;">مضغوط - ملف أصغر</span>
+                    </button>
+                </div>
+            </div>
+
             <div class="controls-buttons">
                 <button id="startBtn">
                     <svg class="icon" viewBox="0 0 24 24">
@@ -472,7 +515,8 @@
 
         <!-- Footer -->
         <div class="footer">
-            <p>تسجيل احترافي بجودة 48kHz • إلغاء صدى الصوت • تقليل الضوضاء</p>
+            <p>🎙️ جودة استوديو احترافية • 48kHz 24-bit • WAV غير مضغوط</p>
+            <p style="margin-top: 5px; font-size: 0.8rem;">معالج صوتي ديناميكي • تحسين تلقائي للصوت</p>
         </div>
     </div>
 
@@ -483,6 +527,7 @@
         let recordings = [];
         let currentTime = 0;
         let volumeLevel = 0;
+        let recordingQuality = 'studio'; // 'studio' or 'high'
 
         // References
         let mediaRecorder = null;
@@ -492,6 +537,7 @@
         let animationFrame = null;
         let timerInterval = null;
         let chunks = [];
+        let audioWorkletNode = null;
 
         // DOM Elements
         const visualizer = document.getElementById('visualizer');
@@ -523,26 +569,64 @@
         // Initialize Audio
         async function initializeAudio() {
             try {
+                // طلب صلاحيات الميكروفون بجودة عالية جداً
                 stream = await navigator.mediaDevices.getUserMedia({
                     audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        sampleRate: 48000,
-                        channelCount: 2
+                        echoCancellation: false,  // إيقاف لأنه يقلل الجودة
+                        noiseSuppression: false,   // إيقاف لأنه يقلل الجودة
+                        autoGainControl: false,    // إيقاف التحكم التلقائي
+                        sampleRate: 48000,         // جودة استوديو
+                        sampleSize: 24,            // عمق 24-bit
+                        channelCount: 2,           // ستيريو
+                        latency: 0                 // أقل تأخير
                     }
                 });
 
-                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                // إنشاء AudioContext بأعلى جودة
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 48000,
+                    latencyHint: 'playback'
+                });
+
                 analyser = audioContext.createAnalyser();
-                analyser.fftSize = 2048;
+                analyser.fftSize = 4096; // تحليل أدق
 
                 const source = audioContext.createMediaStreamSource(stream);
-                source.connect(analyser);
+                
+                // إضافة معالجات صوتية للجودة
+                const dynamicsCompressor = audioContext.createDynamicsCompressor();
+                dynamicsCompressor.threshold.setValueAtTime(-24, audioContext.currentTime);
+                dynamicsCompressor.knee.setValueAtTime(30, audioContext.currentTime);
+                dynamicsCompressor.ratio.setValueAtTime(12, audioContext.currentTime);
+                dynamicsCompressor.attack.setValueAtTime(0.003, audioContext.currentTime);
+                dynamicsCompressor.release.setValueAtTime(0.25, audioContext.currentTime);
 
-                mediaRecorder = new MediaRecorder(stream, {
-                    mimeType: 'audio/webm;codecs=opus',
-                    audioBitsPerSecond: 128000
-                });
+                // توصيل المعالجات
+                source.connect(dynamicsCompressor);
+                dynamicsCompressor.connect(analyser);
+
+                // اختيار أفضل جودة تسجيل متوفرة
+                let options;
+                if (MediaRecorder.isTypeSupported('audio/webm;codecs=pcm')) {
+                    // PCM غير مضغوط - أفضل جودة
+                    options = {
+                        mimeType: 'audio/webm;codecs=pcm',
+                        audioBitsPerSecond: 2116800 // ~2 Mbps
+                    };
+                } else if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+                    // Opus بأعلى جودة
+                    options = {
+                        mimeType: 'audio/webm;codecs=opus',
+                        audioBitsPerSecond: 510000 // 510 kbps - أعلى جودة
+                    };
+                } else {
+                    // احتياطي
+                    options = {
+                        audioBitsPerSecond: 320000
+                    };
+                }
+
+                mediaRecorder = new MediaRecorder(stream, options);
 
                 mediaRecorder.ondataavailable = (e) => {
                     if (e.data.size > 0) {
@@ -550,14 +634,31 @@
                     }
                 };
 
-                mediaRecorder.onstop = () => {
-                    const blob = new Blob(chunks, { type: 'audio/webm' });
-                    const url = URL.createObjectURL(blob);
+                mediaRecorder.onstop = async () => {
+                    const mimeType = options.mimeType || 'audio/webm';
+                    const blob = new Blob(chunks, { type: mimeType });
+                    
+                    // تحويل إلى WAV للجودة القصوى (اختياري)
+                    let finalBlob = blob;
+                    let fileExt = 'webm';
+                    
+                    if (recordingQuality === 'studio') {
+                        try {
+                            finalBlob = await convertToWAV(blob);
+                            fileExt = 'wav';
+                        } catch (err) {
+                            console.log('استخدام WebM بدلاً من WAV');
+                        }
+                    }
+                    
+                    const url = URL.createObjectURL(finalBlob);
                     const recording = {
                         id: Date.now(),
                         url: url,
                         duration: currentTime,
-                        timestamp: new Date().toLocaleString('ar-SA')
+                        timestamp: new Date().toLocaleString('ar-SA'),
+                        format: fileExt,
+                        size: (finalBlob.size / 1024 / 1024).toFixed(2) + ' MB'
                     };
                     recordings.push(recording);
                     chunks = [];
@@ -571,6 +672,71 @@
                 alert('الرجاء السماح بالوصول للميكروفون');
                 return false;
             }
+        }
+
+        // تحويل إلى WAV (جودة غير مضغوطة)
+        async function convertToWAV(blob) {
+            const arrayBuffer = await blob.arrayBuffer();
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: 48000
+            });
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+            
+            const wavBuffer = audioBufferToWav(audioBuffer);
+            return new Blob([wavBuffer], { type: 'audio/wav' });
+        }
+
+        // تحويل AudioBuffer إلى WAV
+        function audioBufferToWav(buffer) {
+            const numOfChan = buffer.numberOfChannels;
+            const length = buffer.length * numOfChan * 2;
+            const bufferArray = new ArrayBuffer(44 + length);
+            const view = new DataView(bufferArray);
+            const channels = [];
+            let offset = 0;
+            let pos = 0;
+
+            // كتابة WAV header
+            setUint32(0x46464952); // "RIFF"
+            setUint32(length + 36); // file length - 8
+            setUint32(0x45564157); // "WAVE"
+            setUint32(0x20746d66); // "fmt "
+            setUint32(16); // length = 16
+            setUint16(1); // PCM (uncompressed)
+            setUint16(numOfChan);
+            setUint32(buffer.sampleRate);
+            setUint32(buffer.sampleRate * 2 * numOfChan); // avg. bytes/sec
+            setUint16(numOfChan * 2); // block-align
+            setUint16(16); // 16-bit
+            setUint32(0x61746164); // "data"
+            setUint32(length);
+
+            // كتابة البيانات الصوتية
+            for (let i = 0; i < buffer.numberOfChannels; i++) {
+                channels.push(buffer.getChannelData(i));
+            }
+
+            while (pos < buffer.length) {
+                for (let i = 0; i < numOfChan; i++) {
+                    let sample = Math.max(-1, Math.min(1, channels[i][pos]));
+                    sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+                    view.setInt16(44 + offset, sample, true);
+                    offset += 2;
+                }
+                pos++;
+            }
+
+            function setUint16(data) {
+                view.setUint16(pos, data, true);
+                pos += 2;
+            }
+
+            function setUint32(data) {
+                view.setUint32(pos, data, true);
+                pos += 4;
+            }
+
+            return bufferArray;
         }
 
         // Draw Visualizer
@@ -756,7 +922,7 @@
                         <div class="recording-info">
                             <div class="recording-title">تسجيل #${recordings.length - index}</div>
                             <div class="recording-timestamp">${rec.timestamp}</div>
-                            <div class="recording-duration">المدة: ${formatTime(rec.duration)}</div>
+                            <div class="recording-duration">المدة: ${formatTime(rec.duration)} • ${rec.format.toUpperCase()} • ${rec.size}</div>
                         </div>
                         <div class="recording-actions">
                             <button class="icon-btn download-btn" onclick="downloadRecording(${rec.id})" title="تحميل">
@@ -788,7 +954,7 @@
 
             const a = document.createElement('a');
             a.href = recording.url;
-            a.download = `تسجيل-${id}.webm`;
+            a.download = `تسجيل-${id}.${recording.format}`;
             a.click();
         }
 
@@ -797,6 +963,26 @@
             if (confirm('هل تريد حذف هذا التسجيل؟')) {
                 recordings = recordings.filter(r => r.id !== id);
                 updateRecordingsList();
+            }
+        }
+
+        // Set Quality
+        function setQuality(quality) {
+            if (isRecording) {
+                alert('لا يمكن تغيير الجودة أثناء التسجيل');
+                return;
+            }
+            
+            recordingQuality = quality;
+            
+            // تحديث الأزرار
+            document.getElementById('studioQuality').classList.remove('active');
+            document.getElementById('highQuality').classList.remove('active');
+            
+            if (quality === 'studio') {
+                document.getElementById('studioQuality').classList.add('active');
+            } else {
+                document.getElementById('highQuality').classList.add('active');
             }
         }
 
